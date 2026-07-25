@@ -1,0 +1,7 @@
+# Archivo de configuración del proyecto
+# Definir aquí variables de entorno y parámetros generales
+
+ENV=development
+DATA_PATH=./Base_de_datos.csv
+MODEL_OUTPUT_PATH=./mlops_pipeline/src/model_output
+LOG_LEVEL=INFO
