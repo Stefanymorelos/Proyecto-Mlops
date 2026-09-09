@@ -81,7 +81,7 @@ class ModeloHeuristicoRiesgo(ClassifierMixin, BaseEstimator):
     # Validacion
     # ------------------------------------------------------------------
     def _validar_parametros(self) -> np.ndarray:
-        if not 0 < self.review_fraction < 1:
+        if self.review_fraction <= 0 or self.review_fraction >= 1:
             raise ValueError("review_fraction debe estar estrictamente entre 0 y 1")
         pesos = np.asarray(self.pesos_componentes, dtype=float)
         if pesos.shape != (len(COMPONENTES),):
