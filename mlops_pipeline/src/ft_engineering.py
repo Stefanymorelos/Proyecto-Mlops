@@ -38,11 +38,20 @@ class ColumnasIrrelevantes(BaseEstimator, TransformerMixin):
       numerico sin transformar; se deja fuera del modelado por ahora.
     - 'tipo_credito': se reemplaza por 'tipo_credito_agrupado' (creada en
       NuevasVariables) para no duplicar la misma señal dos veces.
+    - 'capital_prestado': redundante con 'cuota_pactada' (correlacion de
+      0.764 entre ambas) -- se conserva cuota_pactada porque alimenta
+      ratio_cuota_ingreso, una variable de negocio ya validada como
+      relevante. plazo_meses se conserva por ser relativamente
+      independiente de las otras dos (corr <= 0.30).
+    - 'saldo_mora_codeudor': varianza casi nula (99.97% de los valores son
+      0), no aporta señal util al modelo. Observacion de revision de
+      pares (acuerdo de clase).
     """
 
     def __init__(self, cols_to_drop=None):
         self.cols_to_drop = cols_to_drop if cols_to_drop is not None else [
             "puntaje", "fecha_prestamo", "tipo_credito",
+            "capital_prestado", "saldo_mora_codeudor",
         ]
 
     def fit(self, X, y=None):
@@ -133,9 +142,6 @@ class Imputacion(BaseEstimator, TransformerMixin):
 
     def transform(self, X):
         X = X.copy()
-
-        if "saldo_mora_codeudor" in X.columns:
-            X["saldo_mora_codeudor"] = X["saldo_mora_codeudor"].fillna(0)
 
         if {"saldo_principal", "saldo_total", "saldo_mora"}.issubset(X.columns):
             mask_derivable = (
@@ -231,20 +237,32 @@ class ToCategory(BaseEstimator, TransformerMixin):
 class EliminarCategorias(BaseEstimator, TransformerMixin):
     """
     Elimina filas de categorias estadisticamente inmanejables cuando se
-    quiere que el modelo no las vea en absoluto. Por defecto no elimina
-    nada (tipo_credito_agrupado ya resuelve esto fusionando en "Otros"
-    sin perder filas); se deja disponible para casos puntuales futuros.
+    quiere que el modelo no las vea en absoluto.
+
+    Por acuerdo de clase: se conservan unicamente los tipos de credito
+    mayoritarios (4 y 9), que concentran el 98% de la base. Los codigos
+    6, 7, 10 y 68 se descartan por tener muy poca representacion
+    (140 filas en total, 1.3% del dataset) y no aportar de forma
+    confiable al entrenamiento del modelo.
+
+    Nota: en el Entregable 2 se habia documentado que el codigo 6 mostraba
+    una tasa de mora muy alta (42.9%, n=21) como hallazgo de negocio. Esa
+    observacion se mantiene documentada en comprension_eda.ipynb como
+    alerta cualitativa para el area de riesgo, aunque se excluye de los
+    datos de entrenamiento del modelo por su bajo volumen.
     """
 
-    def __init__(self, target_col=None, cats_to_drop=None):
+    def __init__(self, target_col="tipo_credito", cats_to_drop=None):
         self.target_col = target_col
-        self.cats_to_drop = cats_to_drop if cats_to_drop is not None else []
+        self.cats_to_drop = cats_to_drop if cats_to_drop is not None else [6, 7, 10, 68]
 
     def fit(self, X, y=None):
         return self
 
     def transform(self, X):
         if not self.target_col or not self.cats_to_drop:
+            return X
+        if self.target_col not in X.columns:
             return X
         return X[~X[self.target_col].isin(self.cats_to_drop)].copy()
 
@@ -266,14 +284,15 @@ pipeline_basemodel = Pipeline(steps=[
 
 # Variables finales para el modelo, tras limpieza + variables derivadas.
 # Se excluyen: identificadores/fecha (fecha_prestamo), columnas con fuga
-# de informacion (puntaje) y columnas redundantes (tipo_credito crudo,
-# reemplazado por tipo_credito_agrupado). Todo esto ya lo maneja
-# ColumnasIrrelevantes arriba.
+# de informacion (puntaje), columnas redundantes (tipo_credito crudo,
+# reemplazado por tipo_credito_agrupado; capital_prestado, redundante con
+# cuota_pactada) y columnas de varianza casi nula (saldo_mora_codeudor).
+# Todo esto ya lo maneja ColumnasIrrelevantes arriba.
 NUMERIC_FEATURES = [
-    "capital_prestado", "plazo_meses", "edad_cliente", "salario_cliente",
+    "plazo_meses", "edad_cliente", "salario_cliente",
     "total_otros_prestamos", "cuota_pactada", "puntaje_datacredito",
     "cant_creditosvigentes", "huella_consulta", "saldo_mora", "saldo_total",
-    "saldo_principal", "saldo_mora_codeudor", "creditos_sectorFinanciero",
+    "saldo_principal", "creditos_sectorFinanciero",
     "creditos_sectorCooperativo", "creditos_sectorReal",
     "promedio_ingresos_datacredito", "tiene_info_ingresos_buro",
     "lote_datos_sospechoso", "ratio_cuota_ingreso", "nivel_endeudamiento",
