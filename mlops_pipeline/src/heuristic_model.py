@@ -86,7 +86,7 @@ class ModeloHeuristicoRiesgo(ClassifierMixin, BaseEstimator):
         pesos = np.asarray(self.pesos_componentes, dtype=float)
         if pesos.shape != (len(COMPONENTES),):
             raise ValueError(f"pesos_componentes debe tener {len(COMPONENTES)} valores")
-        if not np.isfinite(pesos).all() or (pesos < 0).any() or pesos.sum() == 0:
+        if not np.isfinite(pesos).all() or (pesos < 0).any() or np.isclose(pesos.sum(), 0.0):
             raise ValueError("pesos_componentes debe ser finito, no negativo y no todo cero")
         return pesos
 
