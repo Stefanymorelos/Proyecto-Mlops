@@ -81,7 +81,12 @@ class ModeloHeuristicoRiesgo(ClassifierMixin, BaseEstimator):
     # Validacion
     # ------------------------------------------------------------------
     def _validar_parametros(self) -> np.ndarray:
-        if self.review_fraction <= 0 or self.review_fraction >= 1:
+        # Nota: la condicion de abajo valida que 0 < review_fraction < 1.
+        # SonarQube la marca como "siempre verdadera" (falso positivo: no rastrea
+        # que self.review_fraction varia por instancia, viene del constructor).
+        # Verificado exhaustivamente en tests/test_heuristic_model.py::
+        # TestValidacionParametros (0, 1, -0.1, 1.5 rechazados; 0.01, 0.5, 0.99 aceptados).
+        if self.review_fraction <= 0 or self.review_fraction >= 1:  # NOSONAR
             raise ValueError("review_fraction debe estar estrictamente entre 0 y 1")
         pesos = np.asarray(self.pesos_componentes, dtype=float)
         if pesos.shape != (len(COMPONENTES),):
