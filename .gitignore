@@ -18,3 +18,9 @@ config.env
 # Sistema
 .DS_Store
 Thumbs.db
+
+# Archivos generados por pytest-cov (no son codigo, se regeneran solos)
+.coverage
+coverage.xml
+.pytest_cache/
+htmlcov/
