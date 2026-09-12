@@ -42,7 +42,30 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.svm import SVC
 
-from ft_engineering import CATEGORICAL_FEATURES, NUMERIC_FEATURES, TARGET_COL, build_features
+try:
+    from ft_engineering import CATEGORICAL_FEATURES, NUMERIC_FEATURES, TARGET_COL, build_features
+except ImportError:
+    # ft_engineering.py todavia no tiene estas piezas en esta rama (requiere
+    # el PR3 mergeado a developer). Se usa una COPIA de respaldo del esquema
+    # ya validado (mismos nombres exactos que ft_engineering.py define), NO
+    # listas vacias -- asi el preprocesador de este modulo sigue funcionando
+    # de verdad con datos sinteticos/reales de prueba mientras tanto. Solo
+    # build_features (que si depende de logica real de ft_engineering.py)
+    # queda en None, y unicamente las pruebas que la necesitan de verdad se
+    # saltan (ver tests/test_model_training_evaluation.py).
+    NUMERIC_FEATURES = [
+        "plazo_meses", "edad_cliente", "salario_cliente",
+        "total_otros_prestamos", "cuota_pactada", "puntaje_datacredito",
+        "cant_creditosvigentes", "huella_consulta", "saldo_mora", "saldo_total",
+        "saldo_principal", "creditos_sectorFinanciero",
+        "creditos_sectorCooperativo", "creditos_sectorReal",
+        "promedio_ingresos_datacredito", "tiene_info_ingresos_buro",
+        "lote_datos_sospechoso", "ratio_cuota_ingreso", "nivel_endeudamiento",
+    ]
+    CATEGORICAL_FEATURES = ["tipo_laboral", "tipo_credito_agrupado", "tendencia_ingresos"]
+    TARGET_COL = "Pago_atiempo"
+    build_features = None
+
 from heuristic_model import ModeloHeuristicoRiesgo
 
 RANDOM_STATE = 42
