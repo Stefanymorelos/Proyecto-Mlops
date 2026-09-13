@@ -1,0 +1,10 @@
+# Dependencias minimas para SERVIR el modelo (no para entrenarlo ni
+# explorarlo) -- instalar esto, no requirements.txt completo, dentro de la
+# imagen de Docker, para que quede lo mas liviana posible.
+pandas>=2.0,<3
+numpy>=1.24,<3
+scikit-learn>=1.3,<2
+joblib>=1.3,<2
+fastapi>=0.110,<1
+uvicorn[standard]>=0.29,<1
+pydantic>=2.6,<3
