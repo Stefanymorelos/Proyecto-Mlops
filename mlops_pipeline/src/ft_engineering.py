@@ -8,16 +8,20 @@ Diseñado como una cadena de Transformers de scikit-learn (BaseEstimator +
 TransformerMixin) para que todo el flujo de limpieza + features sea
 reproducible, testeable por partes, y reutilizable dentro de un Pipeline.
 
-Este archivo se construye de forma incremental en 3 PR:
-  PR1 (este bloque): limpieza base -> nulos, outliers, columnas irrelevantes
+Construido en 3 PR:
+  PR1: limpieza base -> nulos, outliers, columnas irrelevantes
   PR2: variables derivadas y manejo de categorias
-  PR3: ensamblaje del pipeline completo + separacion train/test
+  PR3 (este bloque): ensamblaje del pipeline completo + separacion train/test
 """
 
 import pandas as pd
 import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.model_selection import train_test_split
 
 
 # ---------------------------------------------------------------------------
@@ -28,16 +32,27 @@ class ColumnasIrrelevantes(BaseEstimator, TransformerMixin):
     """
     Elimina columnas que no deben usarse como variables explicativas.
 
-    En este dataset, 'puntaje' tiene fuga de informacion: su correlacion con
-    el target (Pago_atiempo) es de 0.92, mientras que con el score real de
-    la central de riesgo (puntaje_datacredito) es de apenas 0.09. El valor
-    de relleno (95,227787) nunca aparece en un credito que cayo en mora, lo
-    que confirma que la variable ya "conoce" el resultado -> no se debe usar
-    como predictor (ver Entregable 2, Hallazgo 1).
+    - 'puntaje': tiene fuga de informacion (corr=0.92 con el target, ver
+      Hallazgo 1 en comprension_eda.ipynb).
+    - 'fecha_prestamo': fecha cruda en texto, no aporta como feature
+      numerico sin transformar; se deja fuera del modelado por ahora.
+    - 'tipo_credito': se reemplaza por 'tipo_credito_agrupado' (creada en
+      NuevasVariables) para no duplicar la misma señal dos veces.
+    - 'capital_prestado': redundante con 'cuota_pactada' (correlacion de
+      0.764 entre ambas) -- se conserva cuota_pactada porque alimenta
+      ratio_cuota_ingreso, una variable de negocio ya validada como
+      relevante. plazo_meses se conserva por ser relativamente
+      independiente de las otras dos (corr <= 0.30).
+    - 'saldo_mora_codeudor': varianza casi nula (99.97% de los valores son
+      0), no aporta señal util al modelo. Observacion de revision de
+      pares (acuerdo de clase).
     """
 
     def __init__(self, cols_to_drop=None):
-        self.cols_to_drop = cols_to_drop if cols_to_drop is not None else ["puntaje"]
+        self.cols_to_drop = cols_to_drop if cols_to_drop is not None else [
+            "puntaje", "fecha_prestamo", "tipo_credito",
+            "capital_prestado", "saldo_mora_codeudor",
+        ]
 
     def fit(self, X, y=None):
         return self
@@ -48,18 +63,9 @@ class ColumnasIrrelevantes(BaseEstimator, TransformerMixin):
 
 class ColumnasNulos(BaseEstimator, TransformerMixin):
     """
-    Corrige valores invalidos/corruptos que en realidad representan datos
-    faltantes, dejandolos como NaN explicito para que Imputacion los trate
-    despues con criterio de negocio (nunca se rellenan a ciegas).
-
-    Cubre:
-    - tendencia_ingresos: 58 filas con numeros sueltos en vez de categoria
-      (Creciente/Decreciente/Estable). Se valido que no es un corrimiento
-      de columnas (todas las filas tienen 23 campos); son errores de
-      captura aislados (Hallazgo 2).
-    - salario_cliente: filas con salario = 0 (pero credito real aprobado,
-      lo cual es incompatible con la verificacion de capacidad de pago) o
-      con cuota_pactada > salario_cliente (35 filas en total, Hallazgo 8).
+    Corrige valores invalidos que representan datos faltantes, dejandolos
+    como NaN explicito para que Imputacion los trate con criterio de
+    negocio (Hallazgo 2 y 8).
     """
 
     CATEGORIAS_VALIDAS_TENDENCIA = ["Creciente", "Decreciente", "Estable"]
@@ -70,7 +76,6 @@ class ColumnasNulos(BaseEstimator, TransformerMixin):
     def transform(self, X):
         X = X.copy()
 
-        # tendencia_ingresos: valores no categoricos -> NaN
         if "tendencia_ingresos" in X.columns:
             mask_invalida = (
                 ~X["tendencia_ingresos"].isin(self.CATEGORIAS_VALIDAS_TENDENCIA)
@@ -78,7 +83,6 @@ class ColumnasNulos(BaseEstimator, TransformerMixin):
             )
             X.loc[mask_invalida, "tendencia_ingresos"] = np.nan
 
-        # salario_cliente: cero, o menor que la cuota pactada -> NaN
         if "salario_cliente" in X.columns and "cuota_pactada" in X.columns:
             mask_cero = X["salario_cliente"] == 0
             con_salario = X["salario_cliente"] > 0
@@ -94,17 +98,10 @@ class ColumnasNulos(BaseEstimator, TransformerMixin):
 
 class Outliers(BaseEstimator, TransformerMixin):
     """
-    Corrige (no elimina) el bloque de filas con edad distorsionada por un
-    error sistematico de +100 anios (ej. 122 en vez de 22). El patron es
-    matematicamente exacto: edad_registrada - 100 da una distribucion de
-    edades normal (desviacion de solo 0.2 anios), por lo que se corrige
-    con alta confianza en vez de descartar las filas (Hallazgo 7).
-
-    Tambien marca esas filas con 'lote_datos_sospechoso', porque el mismo
-    bloque tiene salario_cliente y total_otros_prestamos con factores de
-    escala inconsistentes entre si (29.4x vs 16.1x) -> ese dato de ingreso
-    no se corrige (no hay formula confiable), solo se deja senializado
-    para que analisis posteriores lo puedan excluir si dependen del ingreso.
+    Corrige el bloque de 150 filas con edad +100 anios (patron exacto,
+    desviacion de 0.2 anios) y marca 'lote_datos_sospechoso' porque el
+    salario y otros_prestamos de ese mismo bloque no tienen un factor de
+    escala consistente entre si (Hallazgo 7).
     """
 
     EDAD_MAXIMA_PLAUSIBLE = 90
@@ -129,23 +126,10 @@ class Outliers(BaseEstimator, TransformerMixin):
 
 class Imputacion(BaseEstimator, TransformerMixin):
     """
-    Imputa nulos con logica de negocio diferenciada por variable, en vez de
-    una unica estrategia generica (Hallazgo 3 y 5):
-
-    - saldo_mora_codeudor: el 99.97% de los valores no nulos son 0 (casi
-      nadie tiene codeudor en mora) -> se imputa con 0.
-    - saldo_principal: cuando saldo_total y saldo_mora si existen, se
-      deriva matematicamente con la identidad contable ya validada
-      (saldo_total ~= saldo_principal + saldo_mora), en vez de imputar
-      con la mediana a ciegas.
-    - saldo_mora / saldo_total: si de verdad no hay ninguna pista (los 156
-      casos donde los 4 campos de saldo faltan a la vez), se imputan con
-      la mediana como ultimo recurso, ya que un modelo de sklearn no puede
-      entrenarse con NaN.
-    - puntaje_datacredito: nulo unicamente en clientes sin ningun rastro
-      previo (cant_creditosvigentes=0 y huella_consulta=0, su primer
-      credito) -> se imputa con la mediana general como piso conservador,
-      documentando que representa "score minimo esperado sin historial".
+    Imputa nulos con logica de negocio diferenciada por variable
+    (Hallazgo 3 y 5). Los nulos que no tienen una regla de negocio propia
+    (salario_cliente, promedio_ingresos_datacredito) se dejan para el
+    SimpleImputer generico del ColumnTransformer de modelado (mas abajo).
     """
 
     def fit(self, X, y=None):
@@ -158,9 +142,6 @@ class Imputacion(BaseEstimator, TransformerMixin):
 
     def transform(self, X):
         X = X.copy()
-
-        if "saldo_mora_codeudor" in X.columns:
-            X["saldo_mora_codeudor"] = X["saldo_mora_codeudor"].fillna(0)
 
         if {"saldo_principal", "saldo_total", "saldo_mora"}.issubset(X.columns):
             mask_derivable = (
@@ -177,7 +158,6 @@ class Imputacion(BaseEstimator, TransformerMixin):
         if "saldo_total" in X.columns:
             X["saldo_total"] = X["saldo_total"].fillna(self.median_saldo_total_)
         if "saldo_principal" in X.columns:
-            # ultimo recurso, ya con saldo_total/saldo_mora imputados arriba
             X["saldo_principal"] = X["saldo_principal"].fillna(
                 X["saldo_total"] - X["saldo_mora"]
             )
@@ -190,16 +170,221 @@ class Imputacion(BaseEstimator, TransformerMixin):
 
 
 # ---------------------------------------------------------------------------
-# Pipeline PR1 (se ira extendiendo en PR2 y PR3)
+# PR2: Variables derivadas y manejo de categorias
 # ---------------------------------------------------------------------------
 
-pipeline_basemodel_pr1 = Pipeline(steps=[
-    ("columnas_irrelevantes", ColumnasIrrelevantes(cols_to_drop=["puntaje"])),
+class NuevasVariables(BaseEstimator, TransformerMixin):
+    """
+    Construye variables derivadas orientadas al negocio de riesgo de credito
+    (ver Entregable 2, seccion "Variables derivadas").
+    """
+
+    MAPA_TIPO_CREDITO = {4: "4", 9: "9", 10: "10", 6: "6"}
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        X = X.copy()
+
+        if "promedio_ingresos_datacredito" in X.columns:
+            X["tiene_info_ingresos_buro"] = X["promedio_ingresos_datacredito"].notna().astype(int)
+
+        if "tipo_credito" in X.columns:
+            X["tipo_credito_agrupado"] = (
+                X["tipo_credito"].map(self.MAPA_TIPO_CREDITO).fillna("Otros")
+            )
+
+        if {"cuota_pactada", "salario_cliente"}.issubset(X.columns):
+            X["ratio_cuota_ingreso"] = X["cuota_pactada"] / X["salario_cliente"]
+
+        if {"total_otros_prestamos", "saldo_total", "salario_cliente"}.issubset(X.columns):
+            X["nivel_endeudamiento"] = (
+                X["total_otros_prestamos"].fillna(0) + X["saldo_total"].fillna(0)
+            ) / X["salario_cliente"]
+
+        return X
+
+
+class ToCategory(BaseEstimator, TransformerMixin):
+    """
+    Convierte columnas a tipo 'category' de pandas y rellena
+    tendencia_ingresos faltante con "Sin_dato" (OneHotEncoder no maneja
+    NaN directamente, y este nulo ya tiene interpretacion de negocio
+    propia, ver Hallazgo 4).
+    """
+
+    def __init__(self, cols=None):
+        self.cols = cols if cols is not None else [
+            "tipo_laboral",
+            "tipo_credito_agrupado",
+            "tendencia_ingresos",
+        ]
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        X = X.copy()
+        if "tendencia_ingresos" in X.columns:
+            X["tendencia_ingresos"] = X["tendencia_ingresos"].fillna("Sin_dato")
+        for c in self.cols:
+            if c in X.columns:
+                X[c] = X[c].astype("category")
+        return X
+
+
+class EliminarCategorias(BaseEstimator, TransformerMixin):
+    """
+    Elimina filas de categorias estadisticamente inmanejables cuando se
+    quiere que el modelo no las vea en absoluto.
+
+    Por acuerdo de clase: se conservan unicamente los tipos de credito
+    mayoritarios (4 y 9), que concentran el 98% de la base. Los codigos
+    6, 7, 10 y 68 se descartan por tener muy poca representacion
+    (140 filas en total, 1.3% del dataset) y no aportar de forma
+    confiable al entrenamiento del modelo.
+
+    Nota: en el Entregable 2 se habia documentado que el codigo 6 mostraba
+    una tasa de mora muy alta (42.9%, n=21) como hallazgo de negocio. Esa
+    observacion se mantiene documentada en comprension_eda.ipynb como
+    alerta cualitativa para el area de riesgo, aunque se excluye de los
+    datos de entrenamiento del modelo por su bajo volumen.
+    """
+
+    def __init__(self, target_col="tipo_credito", cats_to_drop=None):
+        self.target_col = target_col
+        self.cats_to_drop = cats_to_drop if cats_to_drop is not None else [6, 7, 10, 68]
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        if not self.target_col or not self.cats_to_drop:
+            return X
+        if self.target_col not in X.columns:
+            return X
+        return X[~X[self.target_col].isin(self.cats_to_drop)].copy()
+
+
+# ---------------------------------------------------------------------------
+# PR3: Ensamblaje final + separacion train/test
+# ---------------------------------------------------------------------------
+
+pipeline_basemodel = Pipeline(steps=[
     ("columnas_nulos", ColumnasNulos()),
     ("outliers", Outliers()),
     ("imputacion", Imputacion()),
+    ("nuevas_variables", NuevasVariables()),
+    ("to_category", ToCategory()),
+    ("eliminar_categorias", EliminarCategorias()),
+    ("columnas_irrelevantes", ColumnasIrrelevantes()),
 ])
 
 
+# Variables finales para el modelo, tras limpieza + variables derivadas.
+# Se excluyen: identificadores/fecha (fecha_prestamo), columnas con fuga
+# de informacion (puntaje), columnas redundantes (tipo_credito crudo,
+# reemplazado por tipo_credito_agrupado; capital_prestado, redundante con
+# cuota_pactada) y columnas de varianza casi nula (saldo_mora_codeudor).
+# Todo esto ya lo maneja ColumnasIrrelevantes arriba.
+NUMERIC_FEATURES = [
+    "plazo_meses", "edad_cliente", "salario_cliente",
+    "total_otros_prestamos", "cuota_pactada", "puntaje_datacredito",
+    "cant_creditosvigentes", "huella_consulta", "saldo_mora", "saldo_total",
+    "saldo_principal", "creditos_sectorFinanciero",
+    "creditos_sectorCooperativo", "creditos_sectorReal",
+    "promedio_ingresos_datacredito", "tiene_info_ingresos_buro",
+    "lote_datos_sospechoso", "ratio_cuota_ingreso", "nivel_endeudamiento",
+]
+
+CATEGORICAL_FEATURES = ["tipo_laboral", "tipo_credito_agrupado", "tendencia_ingresos"]
+
+TARGET_COL = "Pago_atiempo"
+
+
+class ToDF(BaseEstimator, TransformerMixin):
+    """
+    Envuelve un ColumnTransformer (imputacion + escalado numerico,
+    imputacion + one-hot categorico) y devuelve un DataFrame con nombres
+    de columna legibles, en vez del array de numpy que entrega sklearn
+    por defecto. Esto facilita interpretar coeficientes/importancias mas
+    adelante en model_training_evaluation.py.
+    """
+
+    def __init__(self, numeric_features, categorical_features):
+        self.numeric_features = numeric_features
+        self.categorical_features = categorical_features
+        self.ct_ = None
+
+    def fit(self, X, y=None):
+        numeric_pipe = Pipeline(steps=[
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+        ])
+        categorical_pipe = Pipeline(steps=[
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+        ])
+
+        self.ct_ = ColumnTransformer(
+            transformers=[
+                ("num", numeric_pipe, self.numeric_features),
+                ("cat", categorical_pipe, self.categorical_features),
+            ]
+        )
+        self.ct_.fit(X, y)
+        return self
+
+    def transform(self, X):
+        Xt = self.ct_.transform(X)
+        feat_names = self.ct_.get_feature_names_out()
+        return pd.DataFrame(Xt, columns=feat_names, index=X.index)
+
+
+def build_features(df, target_col=TARGET_COL, test_size=0.25, random_state=42):
+    """
+    Punto de entrada principal del modulo. Aplica la limpieza y las
+    variables derivadas (pipeline_basemodel) sobre el dataframe crudo, y
+    separa en conjuntos de entrenamiento/evaluacion estratificados por el
+    target, listos para alimentar model_training_evaluation.py.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Dataframe crudo, tal como sale de Cargar_datos.ipynb.
+    target_col : str
+        Nombre de la columna objetivo (Pago_atiempo).
+    test_size : float
+        Proporcion del set de evaluacion.
+    random_state : int
+        Semilla para reproducibilidad del split.
+
+    Returns
+    -------
+    X_train, X_test : pd.DataFrame
+        Variables explicativas ya limpias (sin escalar/codificar todavia;
+        eso lo hace ToDF/preprocessor, tipicamente dentro del pipeline de
+        modelado para evitar fuga de informacion entre train y test).
+    y_train, y_test : pd.Series
+        Variable objetivo correspondiente a cada conjunto.
+    """
+    df_limpio = pipeline_basemodel.fit_transform(df)
+
+    y = df_limpio[target_col]
+    X = df_limpio.drop(columns=[target_col])
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, stratify=y, random_state=random_state
+    )
+
+    return X_train, X_test, y_train, y_test
+
+
+# Pipeline de preprocesamiento ML, para usar dentro de model_training_evaluation.py
+# junto con el estimador (ej. Pipeline([("preprocessor", preprocessor), ("model", modelo)])).
+preprocessor = ToDF(numeric_features=NUMERIC_FEATURES, categorical_features=CATEGORICAL_FEATURES)
+
+
 if __name__ == "__main__":
-    print("Modulo de feature engineering - PR1 (limpieza base)")
+    print("Modulo de feature engineering - PR3 (pipeline completo)")
