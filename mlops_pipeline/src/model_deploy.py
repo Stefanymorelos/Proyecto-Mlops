@@ -41,6 +41,7 @@ RUTA_MODELO = Path(os.environ.get("RUTA_MODELO", "mejor_modelo_final.joblib"))
 RUTA_DATOS_HISTORICOS = Path(os.environ.get("RUTA_DATOS_HISTORICOS", "Base_de_datos.csv"))
 UMBRAL_DECISION = float(os.environ.get("UMBRAL_DECISION", "0.5"))
 TIPOS_CREDITO_SOPORTADOS = {4, 9}  # los unicos que el modelo vio en entrenamiento (ver ft_engineering.EliminarCategorias)
+RUTA_LOG_PREDICCIONES = Path(os.environ.get("RUTA_LOG_PREDICCIONES", "logs/predicciones_log.csv"))
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +226,35 @@ def salud():
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+def registrar_predicciones(registros: pd.DataFrame, resultado: pd.DataFrame) -> None:
+    """
+    Guarda, en un CSV que va creciendo (append), cada peticion recibida
+    junto con su prediccion -- exactamente lo que pide el PDF para
+    model_monitoring.py despues ("una tabla con los datos pasados al
+    endpoint junto con los pronosticos"). Se usa timestamp UTC para poder
+    analizar despues por periodos.
+
+    Deliberadamente NUNCA lanza una excepcion hacia arriba: si el log
+    falla (disco lleno, permisos, etc.), la prediccion ya se le entrego
+    al cliente igual -- un problema de registro no debe convertirse en un
+    error 500 para quien esta consumiendo el API.
+    """
+    try:
+        from datetime import datetime, timezone
+
+        fila_log = registros.reset_index(drop=True).copy()
+        fila_log["timestamp"] = datetime.now(timezone.utc).isoformat()
+        fila_log["prediccion"] = resultado["prediccion"].to_numpy()
+        fila_log["probabilidad_mora"] = resultado["probabilidad_mora"].to_numpy()
+        fila_log["soportado"] = resultado["soportado"].to_numpy()
+
+        RUTA_LOG_PREDICCIONES.parent.mkdir(parents=True, exist_ok=True)
+        escribir_encabezado = not RUTA_LOG_PREDICCIONES.exists()
+        fila_log.to_csv(RUTA_LOG_PREDICCIONES, mode="a", index=False, header=escribir_encabezado)
+    except Exception:  # noqa: BLE001 -- el logging nunca debe tumbar el API
+        pass
+
+
 @app.post("/predecir_lote", response_model=RespuestaLote)
 def predecir_lote(lote: LotePrediccion) -> RespuestaLote:
     if not lote.creditos:
@@ -233,6 +263,7 @@ def predecir_lote(lote: LotePrediccion) -> RespuestaLote:
     servicio = obtener_servicio()
     registros = pd.DataFrame([c.model_dump() for c in lote.creditos])
     resultado = servicio.predecir_lote(registros)
+    registrar_predicciones(registros, resultado)
 
     predicciones = [
         PrediccionCredito(

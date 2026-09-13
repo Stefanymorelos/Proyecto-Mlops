@@ -54,10 +54,11 @@ def entorno_api(tmp_path_factory):
 
 
 @pytest.fixture
-def cliente(entorno_api, monkeypatch):
+def cliente(entorno_api, monkeypatch, tmp_path):
     """Cliente de pruebas con model_deploy.py apuntando al modelo/CSV de prueba."""
     monkeypatch.setenv("RUTA_MODELO", entorno_api["ruta_modelo"])
     monkeypatch.setenv("RUTA_DATOS_HISTORICOS", entorno_api["ruta_csv"])
+    monkeypatch.setenv("RUTA_LOG_PREDICCIONES", str(tmp_path / "predicciones_log.csv"))
 
     import model_deploy
     importlib.reload(model_deploy)  # para que relea las variables de entorno
@@ -133,6 +134,26 @@ class TestPredecirLote:
 
         r = cliente.post("/predecir_lote", json={"creditos": [credito_incompleto]})
         assert r.status_code == 422  # error de validacion de Pydantic
+
+    def test_cada_peticion_queda_registrada_en_el_log(self, cliente, creditos_de_muestra, monkeypatch):
+        import model_deploy
+        r = cliente.post("/predecir_lote", json={"creditos": creditos_de_muestra})
+        assert r.status_code == 200
+
+        assert model_deploy.RUTA_LOG_PREDICCIONES.exists()
+        log = pd.read_csv(model_deploy.RUTA_LOG_PREDICCIONES)
+        assert len(log) == len(creditos_de_muestra)
+        assert "timestamp" in log.columns
+        assert "prediccion" in log.columns
+        assert "probabilidad_mora" in log.columns
+
+    def test_dos_peticiones_seguidas_se_acumulan_en_el_mismo_log(self, cliente, creditos_de_muestra):
+        import model_deploy
+        cliente.post("/predecir_lote", json={"creditos": creditos_de_muestra[:2]})
+        cliente.post("/predecir_lote", json={"creditos": creditos_de_muestra[:3]})
+
+        log = pd.read_csv(model_deploy.RUTA_LOG_PREDICCIONES)
+        assert len(log) == 5  # 2 + 3, se acumulan, no se sobreescriben
 
 
 class TestServicioPrediccion:
