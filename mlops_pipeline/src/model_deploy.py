@@ -26,7 +26,16 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from sklearn.base import clone
 
-from ft_engineering import pipeline_basemodel
+try:
+    from ft_engineering import pipeline_basemodel
+except ImportError:
+    # pipeline_basemodel todavia no existe en esta rama de ft_engineering.py
+    # (requiere el PR3 mergeado a developer -- ahi se ensambla con ese
+    # nombre exacto). El modulo SI se puede importar igual (para que las
+    # rutas del API queden registradas y las pruebas que no dependen de
+    # esto puedan correr); ServicioPrediccion falla con un mensaje claro
+    # si de verdad se intenta usar sin el PR3 disponible.
+    pipeline_basemodel = None
 
 RUTA_MODELO = Path(os.environ.get("RUTA_MODELO", "mejor_modelo_final.joblib"))
 RUTA_DATOS_HISTORICOS = Path(os.environ.get("RUTA_DATOS_HISTORICOS", "Base_de_datos.csv"))
@@ -96,6 +105,11 @@ class RespuestaLote(BaseModel):
 
 class ServicioPrediccion:
     def __init__(self, ruta_modelo: Path, ruta_datos_historicos: Path):
+        if pipeline_basemodel is None:
+            raise ImportError(
+                "ft_engineering.pipeline_basemodel no esta disponible en esta rama "
+                "(requiere el PR3 mergeado a developer)."
+            )
         if not ruta_modelo.exists():
             raise FileNotFoundError(
                 f"No se encontro el modelo en {ruta_modelo}. "
@@ -243,4 +257,10 @@ def predecir_lote(lote: LotePrediccion) -> RespuestaLote:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Solo para pruebas rapidas locales (python model_deploy.py). Docker
+    # NUNCA ejecuta este bloque -- el contenedor arranca directo con el
+    # CMD del Dockerfile (uvicorn por linea de comandos, con --host
+    # 0.0.0.0, que si es necesario ahi para el mapeo de puertos). Aqui,
+    # para uso local, no hay razon para exponerse a toda la red: basta con
+    # localhost.
+    uvicorn.run(app, host="127.0.0.1", port=8000)
