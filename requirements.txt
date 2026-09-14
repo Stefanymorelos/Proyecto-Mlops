@@ -5,3 +5,7 @@ matplotlib
 seaborn
 jupyter
 python-dotenv
+fastapi
+uvicorn[standard]
+httpx
+scipy
