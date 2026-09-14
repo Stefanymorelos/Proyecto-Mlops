@@ -2,7 +2,7 @@
 
 **Ciencia de Datos en Producción — Entregable 3**
 Pipeline reproducible de extremo a extremo: desde datos crudos hasta un modelo de riesgo de
-crédito entrenado, comparado y evaluado con criterios de negocio.
+crédito entrenado, comparado, desplegado como servicio, y monitoreado en producción.
 
 ---
 
@@ -24,12 +24,18 @@ Proyecto-Mlops/
 │   ├── ft_engineering.py             # limpieza + variables derivadas + train/test
 │   ├── heuristic_model.py            # modelo de reglas de negocio (baseline)
 │   ├── model_training_evaluation.py  # entrenamiento, comparacion y evaluacion de modelos
+│   ├── model_deploy.py               # API (FastAPI) para predicciones por lote
+│   ├── model_evaluation.py           # pestana de metricas del modelo desplegado
+│   ├── model_monitoring.py           # deteccion de data drift
 │   └── config.json
-├── tests/                            # pruebas unitarias (pytest)
+├── tests/                            # 83 pruebas unitarias (pytest)
 ├── graficas/
 │   ├── *.png                         # 7 graficas del EDA (Entregable 2)
 │   └── modelos/                      # 5 graficas de la comparacion de modelos
+├── logs/                             # log de predicciones reales del API (se genera solo)
 ├── .github/workflows/build.yml       # CI: pytest + SonarCloud en cada push/PR
+├── Dockerfile                        # imagen liviana para servir el modelo
+├── requirements-deploy.txt           # dependencias minimas para la imagen de Docker
 ├── sonar-project.properties
 ├── Base_de_datos.csv
 ├── requirements.txt
@@ -78,8 +84,6 @@ Variables derivadas: `tiene_info_ingresos_buro`, `tipo_credito_agrupado`, `ratio
 `capital_prestado` (redundante con `cuota_pactada`, correlación 0.76) y `saldo_mora_codeudor`
 (varianza casi nula); se filtra `tipo_credito` a los códigos mayoritarios (4 y 9).
 
-**22 pruebas · 98% de cobertura.**
-
 ### 3. `heuristic_model.py` — Modelo heurístico (piso sin ML)
 
 `ModeloHeuristicoRiesgo`, compatible con sklearn (`BaseEstimator` + `ClassifierMixin`), combina 4
@@ -87,16 +91,13 @@ señales ya validadas en el EDA (score bajo, huella de consulta alta, edad baja,
 ingresos en buró) en percentiles de riesgo, sin ningún algoritmo de aprendizaje automático. Sirve
 de piso mínimo que cualquier modelo de ML debe superar.
 
-**15 pruebas · 96% de cobertura.**
 **ROC-AUC en holdout: 0.647 · Lift sobre revisión aleatoria: 1.80x**
 
 ### 4. `model_training_evaluation.py` — Entrenamiento y comparación
 
 Compara 5 candidatos —el heurístico + Regresión Logística, Random Forest, HistGradientBoosting y
 SVM (RBF)— usando `build_model` y `summarize_classification`, con `class_weight="balanced"` por
-el desbalance de clases (95.3% / 4.7%). Se eligieron estos 4 algoritmos de ML a propósito (no son
-"los únicos posibles"): cada uno aporta un contraste distinto — lineal/interpretable, no-lineal de
-árboles, boosting (suele ganar en datos tabulares) y SVM (contraste deliberado de escalabilidad).
+el desbalance de clases (95.3% / 4.7%).
 
 **Resultados en holdout (test set, nunca visto durante entrenamiento):**
 
@@ -109,56 +110,96 @@ el desbalance de clases (95.3% / 4.7%). Se eligieron estos 4 algoritmos de ML a 
 | Gradient Boosting | 0.631 | 0.630 ± 0.027 | 0.141 | 0.168 | 0.32 s |
 
 \* *Con el umbral 0.5 por defecto, Random Forest nunca predice la clase minoritaria — justo el
-problema que resuelve el umbral de decisión optimizado por costo de negocio (ver abajo).*
+problema que resuelve el umbral de decisión optimizado por costo de negocio.*
 
 ![Comparación de métricas](graficas/modelos/01_comparacion_metricas.png)
 
 **Ganó la Regresión Logística** — no el modelo más complejo. Consistente con el EDA: las señales
-de riesgo (score, huella de consulta, edad) tienen relaciones monotónicas y aproximadamente
-lineales con la mora, que un modelo lineal captura bien.
+de riesgo tienen relaciones monotónicas y aproximadamente lineales con la mora.
 
-**Ejes de evaluación:**
-
-**Performance** — tabla comparativa arriba (holdout + validación cruzada de 5 folds).
-
-**Consistency** — curva de aprendizaje del ganador: el ROC-AUC de validación se estabiliza a
-partir de ~4.000 muestras (0.645 → 0.651), sin señales de sobreajuste.
+**Consistency** — curva de aprendizaje: el ROC-AUC de validación se estabiliza a partir de ~4.000
+muestras, sin señales de sobreajuste.
 
 ![Curva de aprendizaje](graficas/modelos/02_curva_aprendizaje.png)
 
-**Scalability** — tiempo de ajuste vs. tamaño de muestra: la Regresión Logística escala casi
-plano; el **SVM crece de forma claramente superlineal** (~0.09s → 9.99s, ~110x más lento con solo
-10x más datos) — el contraste esperado para ese algoritmo.
+**Scalability** — el SVM crece de forma claramente superlineal (~0.09s → 9.99s, ~110x más lento
+con solo 10x más datos) — el contraste esperado para ese algoritmo.
 
 ![Curva de escalabilidad](graficas/modelos/03_curva_escalabilidad.png)
 
-**Matriz de confusión del modelo ganador:**
-
 ![Matriz de confusión](graficas/modelos/04_matriz_confusion_mejor_modelo.png)
 
-**Importancia de variables** (coeficientes de la Regresión Logística ganadora):
+**Importancia de variables** (coeficientes de la Regresión Logística ganadora) — todos los signos
+son coherentes con el EDA: score alto y más créditos vigentes reducen el riesgo; huella de
+consulta alta, ser independiente e ingresos decrecientes lo aumentan.
 
 ![Importancia de variables](graficas/modelos/05_importancia_variables.png)
 
-Todos los signos son coherentes con el EDA: score alto y más créditos vigentes reducen el riesgo;
-huella de consulta alta, ser independiente e ingresos decrecientes lo aumentan.
 *(Nota de proceso: `tiene_info_ingresos_buro` se excluyó del modelo — coincidía en 99.4% de las
 filas con la categoría `tendencia_ingresos_Sin_dato`, y mantener ambas generaba coeficientes
-inestables/contradictorios por multicolinealidad; se conservó la que aporta más matiz.)*
+inestables por multicolinealidad.)*
 
-**Mejoras de ingeniería aplicadas:**
-1. Un único `Pipeline` (preprocesador + modelo) por candidato — evita fuga de datos entre folds.
-2. Validación cruzada estratificada (`StratifiedKFold`, 5 folds) para elegir el modelo, no solo un
-   train/test suelto.
-3. Importancia de variables / coeficientes del modelo ganador, con manejo honesto de
-   multicolinealidad (arriba).
-4. Umbral de decisión optimizado por costo de negocio (no 0.5 fijo) — un falso negativo (prestarle
-   a quien no paga) se pondera 5x más caro que un falso positivo (negar un crédito bueno), ajustable
-   según el apetito de riesgo real.
-5. El mejor modelo se guarda con `joblib`, listo para `model_deploy.py`.
+**Mejoras de ingeniería aplicadas:** Pipeline único (evita fuga de datos entre folds), validación
+cruzada estratificada (5 folds), importancia de variables con manejo honesto de multicolinealidad,
+umbral de decisión optimizado por costo de negocio (falso negativo pondera 5x más que falso
+positivo), modelo guardado con `joblib`.
 
-**60 pruebas · 99% de cobertura** (diseñadas para correr en segundos: el flujo completo con los 5
-candidatos —incluyendo SVM— tarda ~2 minutos y se corre manualmente, no en cada `pytest`).
+### 5. `model_deploy.py` — Servicio de predicción (API)
+
+Publica el mejor modelo como un servicio **FastAPI** — no una interfaz visual (Streamlit, etc.),
+sino infraestructura para que otros sistemas consuman el modelo por lote, tal como lo describe el
+enunciado ("una app que permita disponibilizar dicho objeto... endpoint... por batch").
+
+- `GET /salud` — confirma que el modelo cargó bien.
+- `POST /predecir_lote` — recibe un lote de créditos nuevos (datos crudos) y devuelve predicción +
+  probabilidad de cada uno. Encadena automáticamente: datos crudos → limpieza
+  (`ft_engineering.pipeline_basemodel`, ajustada una sola vez con el histórico) → modelo entrenado.
+- Clientes con `tipo_credito` no soportado por el modelo nunca desaparecen de la respuesta — se
+  marcan explícitamente con un motivo, para no desalinear los índices del lote.
+- Cada predicción queda registrada en `logs/predicciones_log.csv` (insumo para evaluación y
+  monitoreo).
+
+**Empaquetado en Docker** (`Dockerfile` + `requirements-deploy.txt`, dependencias mínimas — sin
+Jupyter/matplotlib, solo lo necesario para servir):
+
+```powershell
+docker build -t riesgo-credito-api .
+docker run -d -p 8000:8000 `
+  -v "${PWD}/mejor_modelo_final.joblib:/app/mejor_modelo_final.joblib" `
+  -v "${PWD}/Base_de_datos.csv:/app/Base_de_datos.csv" `
+  --name api-credito riesgo-credito-api
+```
+
+Verificado de punta a punta (no solo con pruebas automatizadas): build exitoso, contenedor
+corriendo, y una petición real `POST /predecir_lote` respondiendo `200 OK` con una predicción y
+probabilidad coherente (`probabilidad_mora: 0.574`).
+
+### 6. `model_evaluation.py` — Pestaña de métricas del modelo desplegado
+
+Genera un reporte HTML autocontenido (sin servidor ni dependencias externas para verlo — se abre
+directo en el navegador) con dos secciones:
+1. **Desempeño del modelo desplegado** contra un conjunto de evaluación con verdad conocida — carga
+   el mismo `.joblib` que sirve `model_deploy.py`, para detectar si alguien lo reemplazó sin avisar.
+2. **Actividad real del API** — resumen del log de predicciones: cuántas peticiones ha recibido,
+   qué fracción se marcó como alto riesgo, distribución de probabilidades.
+
+### 7. `model_monitoring.py` — Detección de *data drift*
+
+Compara la distribución de los datos que están llegando de verdad al API (el log de
+`model_deploy.py`) contra la distribución de los datos de entrenamiento, para detectar si el mundo
+real se está alejando de lo que el modelo aprendió — sin necesitar aún las etiquetas reales de pago.
+
+- **Variables numéricas:** prueba de Kolmogorov-Smirnov (no asume normalidad).
+- **Variables categóricas:** diferencia máxima de proporción entre categorías.
+- Genera un reporte HTML con gráficas de las distribuciones que sí dispararon alerta.
+
+Validado con un caso de drift forzado (edad +40 años, salario ×0.3, 100% independientes): las 3
+columnas alteradas se detectaron correctamente, sin falsos positivos en el caso sin cambios reales.
+
+*Sobre la periodicidad que pide el enunciado: este módulo expone la función de cómputo
+(`calcular_drift`), reutilizable cuantas veces se necesite — la periodicidad real (correrlo cada
+noche, por ejemplo) la define quien lo agende (cron, un scheduler, una tarea programada de GitHub
+Actions), no el módulo en sí.*
 
 ---
 
@@ -166,14 +207,20 @@ candidatos —incluyendo SVM— tarda ~2 minutos y se corre manualmente, no en c
 
 - **SonarCloud**: calidad de código, seguridad, cobertura e integridad validadas automáticamente
   en cada Pull Request (`.github/workflows/build.yml`).
-- **pytest**: 97 pruebas unitarias en total entre los 3 módulos del pipeline, corriendo en
-  segundos.
+- **83 pruebas unitarias** entre los 6 módulos de código del pipeline, **94% de cobertura
+  combinada**, corriendo en segundos.
 - Cada decisión de limpieza/negocio está documentada con la evidencia que la respalda — nunca se
-  imputó ni se descartó nada sin poder mostrar por qué.
+  imputó, descartó, ni desplegó nada sin poder mostrar por qué.
 
-## Pendiente
+## Conclusiones y recomendaciones de negocio
 
-- `model_deploy.py` — publicar el mejor modelo en un endpoint para predicciones por lote.
-- `model_evaluation.py` — tablero de métricas del modelo ya desplegado.
-- `model_monitoring.py` — monitoreo de *data drift* en producción.
-- Tag de versión (`developer` → `master`) una vez el pipeline completo esté estable.
+- El **score de la central de riesgo** sigue siendo, por lejos, la señal más confiable disponible
+  — cualquier ajuste de política de crédito debería apoyarse primero en él.
+- La **huella de consulta reciente** es una señal de alerta temprana barata de obtener: vale la
+  pena monitorearla incluso antes de tener el desenlace real del crédito.
+- El desempeño (ROC-AUC ≈ 0.70) es **modesto pero honesto**: refleja el techo real de lo que estos
+  datos permiten predecir, no una debilidad del modelado — bancos con mejor desempeño usan fuentes
+  de datos (verificación de ingresos, historial bancario completo) que esta base no tiene.
+- Por eso, el modelo se recomienda como **apoyo a la decisión y priorización de revisión manual**,
+  no como aprobación/negación automática — la misma conclusión honesta a la que llegó el análisis
+  más riguroso que revisamos de un compañero del curso.
